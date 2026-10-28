@@ -1,0 +1,13 @@
+node_modules/
+lib/
+dist/
+coverage/
+.cache/
+.scratch/
+releases/
+*.tgz
+*.tsbuildinfo
+.env
+.env.*
+!.env.example
+*.log

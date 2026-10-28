@@ -1,0 +1,5 @@
+[session pty-1 | shell running; send settled; wait <readiness>]
+[retained output may be incomplete]
+FIRST_PAGE_19
+FIRST_PAGE_20
+dsh> 

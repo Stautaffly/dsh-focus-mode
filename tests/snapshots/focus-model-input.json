@@ -1,0 +1,34 @@
+{
+  "tools": [
+    "cordis_inspect_list",
+    "cordis_inspect_query",
+    "exec_command",
+    "job_kill",
+    "job_list",
+    "job_output",
+    "plugin_manager",
+    "present",
+    "run_code",
+    "skill",
+    "web_fetch",
+    "web_search",
+    "workflow",
+    "working_directory",
+    "write_stdin"
+  ],
+  "sections": [
+    "harness:identity",
+    "deployment:persona-prefix",
+    "tools:ptc-only",
+    "context:file-reference",
+    "tool:jobs",
+    "tool:focus-commands",
+    "tool:web_search",
+    "tool:web_fetch",
+    "tool:workflow",
+    "mcp-resource-servers",
+    "tools:sdk",
+    "ui:deliverable-file-references",
+    "deployment:persona-suffix"
+  ]
+}

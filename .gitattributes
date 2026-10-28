@@ -1,0 +1,2 @@
+# Preserve the literal terminal prompt in the output snapshot.
+tests/snapshots/paged-output.txt whitespace=-blank-at-eol
