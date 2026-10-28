@@ -1,31 +1,48 @@
 # dsh-focus-mode
 
+English | [简体中文](README.zh.md)
+
 An external [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) preset with persistent shell sessions, direct tool calls, and TypeScript program execution. No dsh source or frontend patches are required.
 
 Compatibility: dsh `0.2.1-rc.3`, validated against upstream commit `22ddee3792402c3e70ec5f86a63c3e3e895a2f60`. Node.js `>=24.9` is required. This repository extracts the 0.1.2 plugin implementation; its runtime sources and bundle declaration match that implementation.
 
-## Install
+## Installation, updates, and removal
 
-Prepare the compatible host checkout as described under [development](#development), then build a package from this repository:
+### Install a prebuilt package
 
-```sh
-npm ci --ignore-scripts
-DSH_SOURCE="$PWD/../deepseek-harness" npm run link:host
-npm run build
-mkdir -p dist
-npm run pack:release
-```
+Downloadable packages are published on [GitHub Releases](https://github.com/Stautaffly/dsh-focus-mode/releases). Use the official dsh CLI to install the archive directly; users do not need to clone the repository, prepare a host checkout, or install TypeScript. This plugin has not been published to npm.
 
-Install the generated archive in a development profile first:
+Use the CLI belonging to your target DSH application and an initialized Web profile. For a profile named `web`:
 
 ```sh
-dsh --profile focus-sandbox --from-default-profile web
-dsh plugin --profile focus-sandbox add ./dist/dsh-focus-mode-0.1.2.tgz
-dsh --profile focus-sandbox --dump-config
-dsh --profile focus-sandbox
+dsh plugin --profile web add https://github.com/Stautaffly/dsh-focus-mode/releases/download/v0.1.2/dsh-focus-mode-0.1.2.tgz
 ```
 
-Choose **Focus mode** in a new session. Installation adds a preset without changing the current default. To remove it, finish sessions using that preset, then run `dsh plugin --profile focus-sandbox remove dsh-focus-mode`. A restart may be required when the profile does not support hot reload.
+Replace `web` with your actual profile name, such as `web-vanilla`; this command changes only the selected profile. Restart that DSH application after installation, refresh the browser, and choose **Focus mode** in a new session. Installation adds a preset without changing your current default.
+
+To check that the bundle was discovered, run:
+
+```sh
+dsh --profile web --dump-config
+```
+
+The output should contain `external-preset-focus-mode`. The compatibility requirements at the top of this README still apply; this release does not upgrade the host.
+
+### Update
+
+Choose a compatible version from [Releases](https://github.com/Stautaffly/dsh-focus-mode/releases), then run the same `dsh plugin --profile ... add <release-archive-url>` command with that version's download URL and restart the application. The example above pins `0.1.2`; repeating it reinstalls that version rather than selecting a future release automatically.
+
+### Remove
+
+Finish sessions using the preset, then remove the bundle from the same profile:
+
+```sh
+dsh plugin --profile web remove dsh-focus-mode
+```
+
+Restart the application and refresh the browser after removal. Existing sessions retain their recorded preset selection; choose another preset before continuing them without this plugin.
+
+For local builds and installation from a directory or archive, see [development](#development).
 
 ## Behavior
 
@@ -62,28 +79,37 @@ Result byte limits include metadata. Truncation retains the tail and reports pos
 
 ## Development
 
-The `0.2.1-rc.3` native/PTC executor packages used by this baseline are not published on npm. This repository therefore needs a prepared source checkout for both development builds and integration tests. It does not substitute the incompatible published alpha versions. `.npmrc` disables automatic peer installation; the host supplies those capabilities, while the lockfile pins the development tools and ordinary dependencies.
+Only plugin developers need a host source checkout. The `0.2.1-rc.3` native/PTC executor packages used by this baseline are not published on npm. Development builds and integration tests therefore use a prepared checkout; they do not substitute the incompatible published alpha versions. `.npmrc` disables automatic peer installation, and the lockfile pins development tools and ordinary dependencies.
 
-After preparing the host, run:
+Prepare a separate host checkout at the compatibility commit:
+
+```sh
+git clone https://github.com/deepseek-ai/deepseek-harness.git ../deepseek-harness
+git -C ../deepseek-harness checkout 22ddee3792402c3e70ec5f86a63c3e3e895a2f60
+# Follow the host's installation/build instructions, including native addon prerequisites.
+```
+
+Then, from this plugin repository:
 
 ```sh
 npm ci --ignore-scripts
 DSH_SOURCE="$PWD/../deepseek-harness" npm run link:host
 npm run typecheck
 npm run build
-npm pack --dry-run --ignore-scripts
+DSH_SOURCE="$PWD/../deepseek-harness" npm test
+mkdir -p dist
+npm run pack:release
 ```
 
-Prepare a separate dsh source checkout at the compatibility commit. Follow that checkout's installation/build instructions, including its native addon prerequisites. The link script creates links only inside this repository's ignored `node_modules`; it does not install the plugin into the host or edit host files. Re-run it after `npm ci`. Do not use a production checkout as an editable test fixture.
+Install the resulting archive into a development profile with the official CLI:
 
 ```sh
-git clone https://github.com/deepseek-ai/deepseek-harness.git ../deepseek-harness
-git -C ../deepseek-harness checkout 22ddee3792402c3e70ec5f86a63c3e3e895a2f60
-# Install dependencies and build host artifacts in ../deepseek-harness first.
-DSH_SOURCE="$PWD/../deepseek-harness" npm test
+dsh plugin --profile focus-sandbox add ./dist/dsh-focus-mode-0.1.2.tgz
 ```
 
-`DSH_SOURCE` is explicit; there are no personal paths or vendored host sources. The configuration reads the host's source aliases and decorator transform, and generates a lazy fixture import map. It does not edit the host. The 24 existing tests cover real Loader/PTY/jobs behavior, dynamic tool registration and withdrawal, authorization, cancellation/cleanup, pagination, direct/PTC ordering and logs, Web/addon composition, and isolated directory/archive installation and removal. They use no model keys or real model requests.
+The link script creates links only inside this repository's ignored `node_modules`; it does not install the plugin into the host or edit host files. Re-run it after `npm ci`. Keep development profiles separate from production profiles.
+
+`DSH_SOURCE` is explicit; there are no personal paths or vendored host sources. The test configuration reads the host's source aliases and decorator transform, and generates a lazy fixture import map. The 24 existing tests cover real Loader/PTY/jobs behavior, dynamic tool registration and withdrawal, authorization, cancellation/cleanup, pagination, direct/PTC ordering and logs, Web/addon composition, and isolated directory/archive installation and removal. They use no model keys or real model requests.
 
 Runtime code belongs in `src/`; host integration fixtures and expected output belong in `tests/`. See [plugin organization](docs/plugin-organization.md) for a layout that can grow to multiple plugins.
 
