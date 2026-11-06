@@ -15,7 +15,7 @@ Downloadable packages are published on [GitHub Releases](https://github.com/Stau
 Use the CLI belonging to your target DSH application and an initialized Web profile. For a profile named `web`:
 
 ```sh
-dsh plugin --profile web add https://github.com/Stautaffly/dsh-focus-mode/releases/download/v0.1.2/dsh-focus-mode-0.1.2.tgz
+dsh plugin --profile web add https://github.com/Stautaffly/dsh-focus-mode/releases/download/v0.2.0/dsh-focus-mode-0.2.0.tgz
 ```
 
 Replace `web` with your actual profile name, such as `web-vanilla`; this command changes only the selected profile. Restart that DSH application after installation, refresh the browser, and choose **Focus mode** in a new session. Installation adds a preset without changing your current default.
@@ -46,8 +46,10 @@ For local builds and installation from a directory or archive, see [development]
 
 ## Behavior
 
-- `exec_command({cmd, session_id?, cwd?, run_in_background?})` opens or reuses an Agent-owned persistent shell. Working directory and environment survive successive calls. `cwd` applies only to new sessions.
+- `exec_command({cmd, session_id?, cwd?, run_in_background?, new_session?})` runs a command in an Agent-owned persistent shell. Working directory and environment survive successive calls: omitting `session_id` reuses this Agent's most recently used live shell, so the caller does not have to carry an id forward. Pass `new_session:true` to start another shell; `cwd` starts one for that directory and applies only at creation. A background command that omits `session_id` starts its own shell, because a background job owns the whole shell.
 - `write_stdin({session_id, chars?, run_in_background?, close?})` reads new output or sends input. A newline submits input; a standalone Ctrl-C interrupts. `close:true` closes the shell and releases its slot.
+- `focus_sessions({})` lists the shells this Agent owns with their `session_id`, running or exited state, whether a call or background job is using each one, and which shell an omitted `session_id` reuses.
+- Every result is a structured value: `session_id`, `status`, `created`, `send`, `wait`, `text`, and `incomplete`, plus `exit_code`, `signal`, or `job_id` when they apply. Direct calls render the same `[session …]` header as before; `run_code` programs read the fields instead of parsing that header. `created` tells a new shell apart from a reused one, and an unknown `session_id` names the live shells.
 - `run_code` uses the upstream PTC executor. Available plugin tools enter both direct schemas and the program SDK through the host registry; the executor has no tool-name allowlist. Host scope, step admission, restrictions, approvals, guards, cancellation, and logging remain authoritative.
 - Background jobs monitor a whole shell until it exits or closes. `job_kill` closes that shell. Each shell has at most one background monitor. Shell liveness or a settled send does **not** establish that an individual command finished.
 
@@ -55,7 +57,7 @@ The preset retains agent instructions, time context, compaction, skills, web too
 
 ## Configuration
 
-The plugin defaults to four persistent shell sessions per Agent. Session count is configurable from 1 to 64. The upstream jobs registry has a separate concurrent-job limit. The [16-session/16-job example](examples/limits-16.patch.yml) overrides both:
+The plugin defaults to four persistent shell sessions per Agent. Session count is configurable from 1 to 64. `reuseMostRecentSession` keeps calls that omit `session_id` on one shell; turn it off to require an explicit `session_id` or `new_session` on every call. The upstream jobs registry has a separate concurrent-job limit. The [16-session/16-job example](examples/limits-16.patch.yml) overrides both:
 
 ```sh
 dsh --profile focus-sandbox --patch ./examples/limits-16.patch.yml --dump-config
@@ -70,6 +72,7 @@ In this dsh version, a profile patch replaces a matched row's **whole config**. 
 | --- | --- | --- |
 | `backendType` | `shell` | Registered terminal backend |
 | `maxSessionsPerAgent` | 4 | 1–64 |
+| `reuseMostRecentSession` | `true` | boolean |
 | `maxResultBytes` | 262144 | 256–16777216 bytes |
 | `yieldMs` | 1000 | 0–60000 ms |
 | `pollMs` | 50 | 1–10000 ms |

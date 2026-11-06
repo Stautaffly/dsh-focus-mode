@@ -11,7 +11,7 @@ import Loader from '@deepseek-ai/cordis-plugin-loader'
 import Include from '@deepseek-ai/cordis-plugin-include'
 import SystemPrompt, { renderPrompt } from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime, { defineTool } from '@deepseek-ai/dsh-tools'
-import type { ResolvedToolSet } from '@deepseek-ai/dsh-tools'
+import type { ResolvedToolSet, ToolExecutionResult } from '@deepseek-ai/dsh-tools'
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
 import type { Agent } from '@deepseek-ai/dsh-agent'
@@ -114,6 +114,11 @@ async function boot(options: Record<string, unknown> = {}) {
   return { ctx, owner, call, makeOwner, directory }
 }
 const idOf = (text: string) => { const value = /^\[session (\S+) \|/.exec(text)?.[1]; if (!value) throw new Error(text); return value }
+interface CommandValue { session_id: string; status: string; created: boolean; closed: boolean; send: string; wait: string; text: string; incomplete: boolean }
+const valueOf = (result: ToolExecutionResult): CommandValue => {
+  if (result.isError) throw new Error('expected a successful command result')
+  return JSON.parse(JSON.stringify(result.value)) as CommandValue
+}
 async function until(check: () => boolean, timeout = 5000) {
   const deadline = Date.now() + timeout
   while (!check()) { if (Date.now() > deadline) throw new Error('condition timed out'); await delay(20) }
@@ -175,7 +180,7 @@ describe('persistent commands through the real Loader and PTY backend', () => {
     const id = idOf(first.text)
     const written = await call('write_stdin', { session_id: id, chars: 'input-value\n' })
     expect(written.text).toContain('RECEIVED=input-value')
-    expect((await call('exec_command', { cmd: 'echo another' })).result.isError).toBe(true)
+    expect((await call('exec_command', { cmd: 'echo another', new_session: true })).result.isError).toBe(true)
     expect((await call('write_stdin', { session_id: id, close: true })).text).toContain('closed')
     expect((await call('exec_command', { cmd: 'echo replacement' })).result.isError).not.toBe(true)
   })
@@ -394,5 +399,104 @@ describe('bounded output and cursor behavior', () => {
     expect(delta('a\nb\n', 'b\nc\n')).toEqual({ text: 'c\n', gap: false })
     expect(delta('old', 'new')).toEqual({ text: 'new', gap: true })
     expect(delta('same', 'same')).toEqual({ text: '', gap: false })
+  })
+})
+
+describe('sticky shells, discovery, and structured results', () => {
+  it('reuses the most recent live shell when session_id is omitted', async () => {
+    const { ctx, owner, call } = await boot()
+    const first = await call('exec_command', { cmd: 'export FOCUS_STICKY=kept' })
+    const id = idOf(first.text)
+    expect(valueOf(first.result).created).toBe(true)
+    const second = await call('exec_command', { cmd: 'printf "STICKY=%s\\n" "$FOCUS_STICKY"' })
+    expect(second.text).toContain('STICKY=kept')
+    expect(idOf(second.text)).toBe(id)
+    expect(valueOf(second.result).session_id).toBe(id)
+    expect(valueOf(second.result).created).toBe(false)
+    expect(ctx.terminals.list(owner)).toHaveLength(1)
+  })
+  it('starts another shell only when asked, and reports it as created', async () => {
+    const { ctx, owner, call } = await boot()
+    const first = idOf((await call('exec_command', { cmd: 'export FOCUS_ONLY_FIRST=1' })).text)
+    const second = await call('exec_command', { cmd: 'printf "SECOND=%s\\n" "${FOCUS_ONLY_FIRST-unset}"', new_session: true })
+    const secondId = idOf(second.text)
+    expect(secondId).not.toBe(first)
+    expect(second.text).toContain('SECOND=unset')
+    expect(valueOf(second.result).created).toBe(true)
+    expect(ctx.terminals.list(owner)).toHaveLength(2)
+  })
+  it('treats cwd as a request for a new shell, because cwd only applies at creation', async () => {
+    const { ctx, owner, call } = await boot()
+    const first = idOf((await call('exec_command', { cmd: 'echo first' })).text)
+    const second = await call('exec_command', { cmd: 'pwd', cwd: '/tmp' })
+    expect(idOf(second.text)).not.toBe(first)
+    expect(second.text).toContain('/tmp')
+    expect(ctx.terminals.list(owner)).toHaveLength(2)
+    const combined = await call('exec_command', { cmd: 'echo nope', session_id: first, cwd: '/tmp' })
+    expect(combined.result.isError).toBe(true)
+    expect(combined.text).toContain('cwd applies only to a new session')
+  })
+  it('keeps background commands on their own shell instead of taking the sticky one', async () => {
+    const { ctx, owner, call } = await boot()
+    const foreground = idOf((await call('exec_command', { cmd: 'echo foreground' })).text)
+    const firstJob = await call('exec_command', { cmd: 'sleep 30', run_in_background: true })
+    const secondJob = await call('exec_command', { cmd: 'sleep 30', run_in_background: true })
+    expect(firstJob.result.isError, firstJob.text).not.toBe(true)
+    expect(secondJob.result.isError, secondJob.text).not.toBe(true)
+    expect(idOf(firstJob.text)).not.toBe(foreground)
+    expect(idOf(firstJob.text)).not.toBe(idOf(secondJob.text))
+    const backgroundValue = valueOf(firstJob.result)
+    expect(backgroundValue.job_id).toBeDefined()
+    expect(backgroundValue.status).toBe('running')
+    expect(['settled', 'pending']).toContain(backgroundValue.send)
+    expect(ctx.terminals.list(owner)).toHaveLength(3)
+    for (const job of ctx.jobs.list(owner.id)) await call('job_kill', { job_id: job.id })
+  })
+  it('lists owned shells, marks the default one, and forgets closed shells', async () => {
+    const { ctx, owner, call } = await boot()
+    const empty = await call('focus_sessions', {})
+    expect(empty.text).toContain('focus shells: none')
+    expect(JSON.parse(JSON.stringify(valueOf(empty.result)))).toEqual({ sessions: [] })
+    const id = idOf((await call('exec_command', { cmd: 'echo listed' })).text)
+    const other = idOf((await call('exec_command', { cmd: 'echo other', new_session: true })).text)
+    const listed = await call('focus_sessions', {})
+    expect(listed.text).toContain('focus shells: 2')
+    expect(listed.text).toContain(id)
+    expect(listed.text).toContain(other)
+    expect(listed.text).toContain('default')
+    const sessions = (JSON.parse(JSON.stringify(valueOf(listed.result))) as { sessions: { session_id: string; most_recent: boolean; status: string }[] }).sessions
+    expect(sessions.filter(session => session.most_recent).map(session => session.session_id)).toEqual([other])
+    await call('write_stdin', { session_id: other, close: true })
+    expect((await call('focus_sessions', {})).text).toContain('focus shells: 1')
+    expect(ctx.terminals.list(owner)).toHaveLength(1)
+  })
+  it('names the live shells when a session id is not open', async () => {
+    const { call } = await boot()
+    const id = idOf((await call('exec_command', { cmd: 'echo live' })).text)
+    const missing = await call('write_stdin', { session_id: 'pty-999999' })
+    expect(missing.result.isError).toBe(true)
+    expect(missing.text).toContain('live shells:')
+    expect(missing.text).toContain(id)
+  })
+  it('skips an exited shell and starts a fresh one', async () => {
+    const { ctx, owner, call } = await boot()
+    const exited = idOf((await call('exec_command', { cmd: 'exit 0' })).text)
+    await until(() => ctx.terminals.list(owner)[0]?.status.kind === 'exited')
+    const replacement = await call('exec_command', { cmd: 'echo after-exit' })
+    expect(idOf(replacement.text)).not.toBe(exited)
+    expect(replacement.text).toContain('after-exit')
+    const listed = await call('focus_sessions', {})
+    expect(listed.text).toContain(exited)
+    expect(listed.text).toContain('exited')
+  })
+  it('bounds the structured text as well as the rendered response', async () => {
+    const { call } = await boot({ maxResultBytes: 512 })
+    const value = await call('exec_command', { cmd: 'for i in $(seq 1 400); do printf "CLIPPED_LINE_%s\\n" "$i"; done' })
+    expect(value.result.isError, value.text).not.toBe(true)
+    const output = valueOf(value.result)
+    expect(Buffer.byteLength(output.text)).toBeLessThanOrEqual(512)
+    expect(output.incomplete).toBe(true)
+    expect(Buffer.byteLength(value.text)).toBeLessThanOrEqual(512)
+    expect(value.text).toContain('CLIPPED_LINE_400')
   })
 })

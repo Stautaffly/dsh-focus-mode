@@ -3,6 +3,7 @@
     "cordis_inspect_list",
     "cordis_inspect_query",
     "exec_command",
+    "focus_sessions",
     "job_kill",
     "job_list",
     "job_output",
