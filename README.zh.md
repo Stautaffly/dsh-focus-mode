@@ -51,13 +51,14 @@ dsh plugin --profile web remove dsh-focus-mode
 - `focus_sessions({})` 列出该 Agent 拥有的 shell：`session_id`、运行或已退出状态、是否正被某次调用或后台 job 占用，以及省略 `session_id` 时会复用哪一条。
 - 每次调用都返回结构化结果：`session_id`、`status`、`created`、`send`、`wait`、`text`、`incomplete`，适用时还有 `exit_code`、`signal` 或 `job_id`。直接调用渲染出的文本仍保留原来的 `[session …]` 头部；`run_code` 程序直接读取字段，不必解析该头部。`created` 区分新建与复用，未知 `session_id` 会列出现存活 shell。
 - `run_code` 使用上游 PTC 执行器。插件注册的可见工具会通过宿主注册表自动进入直接调用 schema 与程序 SDK，执行器不维护工具名称白名单。作用域、当前步骤准入、限制、审批、guard、取消和日志仍由宿主管理。
-- 后台 job 监视整条 shell，直到它退出或关闭；`job_kill` 会关闭该 shell。每条 shell 最多有一个后台监视器。**shell 仍在运行或一次 send 已结算，都不能证明某条命令已经完成。**
+- 后台 job 监视整条 shell，直到它退出或关闭；`job_kill` 会关闭该 shell，每条 shell 最多有一个监视器。`maxBackgroundJobsPerAgent`（默认 2）限制单个 Agent 同时运行的后台 job 数，避免后台任务占满全部 shell。job 在 shell 退出或关闭时结束，而不是某条命令结束时：**shell 仍在运行或一次 send 已结算，都不能证明某条命令已经完成。**
+- 后端报告已退出的 shell 会立刻释放配额：不再计入 `maxSessionsPerAgent`，也会从 `focus_sessions` 中消失，跑完的 shell 不会把配额占死。
 
 预设保留 Agent 指令、时间上下文、compaction、skills、Web 工具、交付物、插件检查与管理、workflow 等能力。Agent Teams、会话搜索、worktree 和终端插件注册的额外可见工具会自动被继承。同时提供直接工具 schema 与程序 SDK 会增加提示词长度；PTC 可以减少进入会话历史的中间结果。
 
 ## 配置
 
-插件默认允许每个 Agent 保有四条持久 shell，可配置为 1–64 条。`reuseMostRecentSession` 让省略 `session_id` 的调用保持在同一条 shell 上；关闭后每次调用都必须显式给出 `session_id` 或 `new_session`。上游 jobs 注册表另有并发 job 配额。[16 条 session / 16 个 job 的示例](examples/limits-16.patch.yml) 同时覆盖两项：
+插件默认允许每个 Agent 保有四条持久 shell、两个后台 job，可配置为 1–64。`reuseMostRecentSession` 让省略 `session_id` 的调用保持在同一条 shell 上；关闭后每次调用都必须显式给出 `session_id` 或 `new_session`。上游 jobs 注册表另有并发 job 配额。[16 条 session / 16 个 job 的示例](examples/limits-16.patch.yml) 同时覆盖两项：
 
 ```sh
 dsh --profile focus-sandbox --patch ./examples/limits-16.patch.yml --dump-config
@@ -72,6 +73,7 @@ dsh --profile focus-sandbox --patch ./examples/limits-16.patch.yml
 | --- | --- | --- |
 | `backendType` | `shell` | 已注册的终端后端 |
 | `maxSessionsPerAgent` | 4 | 1–64 |
+| `maxBackgroundJobsPerAgent` | 2 | 1–64 |
 | `reuseMostRecentSession` | `true` | 布尔值 |
 | `maxResultBytes` | 262144 | 256–16777216 字节 |
 | `yieldMs` | 1000 | 0–60000 毫秒 |

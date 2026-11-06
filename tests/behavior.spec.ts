@@ -114,7 +114,7 @@ async function boot(options: Record<string, unknown> = {}) {
   return { ctx, owner, call, makeOwner, directory }
 }
 const idOf = (text: string) => { const value = /^\[session (\S+) \|/.exec(text)?.[1]; if (!value) throw new Error(text); return value }
-interface CommandValue { session_id: string; status: string; created: boolean; closed: boolean; send: string; wait: string; text: string; incomplete: boolean }
+interface CommandValue { session_id: string; status: string; created: boolean; closed: boolean; send: string; wait: string; text: string; incomplete: boolean; job_id?: string }
 const valueOf = (result: ToolExecutionResult): CommandValue => {
   if (result.isError) throw new Error('expected a successful command result')
   return JSON.parse(JSON.stringify(result.value)) as CommandValue
@@ -486,8 +486,9 @@ describe('sticky shells, discovery, and structured results', () => {
     expect(idOf(replacement.text)).not.toBe(exited)
     expect(replacement.text).toContain('after-exit')
     const listed = await call('focus_sessions', {})
-    expect(listed.text).toContain(exited)
-    expect(listed.text).toContain('exited')
+    // The finished shell released its slot instead of lingering in the list.
+    expect(listed.text).not.toContain(exited)
+    expect(listed.text).toContain(idOf(replacement.text))
   })
   it('bounds the structured text as well as the rendered response', async () => {
     const { call } = await boot({ maxResultBytes: 512 })
@@ -498,5 +499,45 @@ describe('sticky shells, discovery, and structured results', () => {
     expect(output.incomplete).toBe(true)
     expect(Buffer.byteLength(value.text)).toBeLessThanOrEqual(512)
     expect(value.text).toContain('CLIPPED_LINE_400')
+  })
+  it('caps background jobs per agent', async () => {
+    const { ctx, owner, call } = await boot()
+    for (let index = 1; index <= 2; index++) {
+      const started = await call('exec_command', { cmd: 'sleep 30', run_in_background: true })
+      expect(started.result.isError, started.text).not.toBe(true)
+    }
+    const rejected = await call('exec_command', { cmd: 'sleep 30', run_in_background: true })
+    expect(rejected.result.isError).toBe(true)
+    expect(rejected.text).toContain('background job limit 2')
+    expect(ctx.jobs.list(owner.id)).toHaveLength(2)
+    for (const job of ctx.jobs.list(owner.id)) await call('job_kill', { job_id: job.id })
+  })
+  it('honours a configured background job limit', async () => {
+    const { ctx, owner, call } = await boot({ maxBackgroundJobsPerAgent: 1 })
+    const first = await call('exec_command', { cmd: 'sleep 30', run_in_background: true })
+    expect(first.result.isError, first.text).not.toBe(true)
+    const rejected = await call('exec_command', { cmd: 'sleep 30', run_in_background: true })
+    expect(rejected.result.isError).toBe(true)
+    expect(rejected.text).toContain('background job limit 1')
+    expect(ctx.jobs.list(owner.id)).toHaveLength(1)
+    for (const job of ctx.jobs.list(owner.id)) await call('job_kill', { job_id: job.id })
+  })
+  it('frees the slot of a shell that exits', async () => {
+    const { call } = await boot({ maxSessionsPerAgent: 1 })
+    const value = valueOf((await call('exec_command', { cmd: 'exit 0' })).result)
+    expect(value.status).toBe('exited')
+    expect((await call('focus_sessions', {})).text).toContain('[focus shells: none]')
+    const replacement = valueOf((await call('exec_command', { cmd: 'echo RECLAIMED' })).result)
+    expect(replacement.created).toBe(true)
+    expect(replacement.text).toContain('RECLAIMED')
+  })
+  it('frees the slot of a monitored shell that exits', async () => {
+    const { ctx, owner, call } = await boot({ maxSessionsPerAgent: 1 })
+    const started = await call('exec_command', { cmd: 'exit 0', run_in_background: true })
+    expect(started.result.isError, started.text).not.toBe(true)
+    await until(() => ctx.jobs.list(owner.id).every(job => job.status !== 'running' && job.status !== 'stopping'))
+    expect((await call('focus_sessions', {})).text).toContain('[focus shells: none]')
+    const replacement = valueOf((await call('exec_command', { cmd: 'echo FRESH' })).result)
+    expect(replacement.created).toBe(true)
   })
 })
