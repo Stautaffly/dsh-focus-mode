@@ -8,17 +8,23 @@
 
 ## 安装、更新与卸载
 
-### 安装预编译包
+### 从 npm 安装
 
-安装包通过 [GitHub Releases](https://github.com/Stautaffly/dsh-focus-mode/releases) 分发，使用 dsh 官方 CLI 即可直接安装。普通用户不需要克隆源码、准备宿主源码目录或安装 TypeScript；本插件目前尚未发布到 npm。
-
-请使用目标 DSH 应用对应的 CLI，并先初始化目标 Web profile。以名为 `web` 的 profile 为例：
+插件已发布为 [`dsh-focus-mode`](https://www.npmjs.com/package/dsh-focus-mode)。使用目标 DSH 应用对应的 dsh CLI，并先初始化目标 Web profile；普通用户不需要克隆源码、准备宿主源码目录或安装 TypeScript。以名为 `web` 的 profile 为例：
 
 ```sh
-dsh plugin --profile web add https://github.com/Stautaffly/dsh-focus-mode/releases/download/v0.2.0/dsh-focus-mode-0.2.0.tgz
+dsh plugin --profile web add dsh-focus-mode
 ```
 
-把 `web` 换成实际使用的 profile 名称，例如 `web-vanilla`；命令只修改指定的 profile。安装完成后，重启对应的 DSH 应用、刷新浏览器，并在新会话中选择 **Focus mode**。安装只增加预设，不会更改现有的默认选择。
+需要可复现安装时固定版本（`dsh-focus-mode@0.4.1`）。把 `web` 换成实际使用的 profile 名称，例如 `web-vanilla`；命令只修改指定的 profile。安装完成后，重启对应的 DSH 应用、刷新浏览器，并在新会话中选择 **Focus mode**。安装只增加预设，不会更改现有的默认选择。
+
+### 从发行包安装
+
+离线环境可以使用 [GitHub Releases](https://github.com/Stautaffly/dsh-focus-mode/releases) 中的安装包，两种方式安装的文件相同。
+
+```sh
+dsh plugin --profile web add https://github.com/Stautaffly/dsh-focus-mode/releases/download/v0.4.1/dsh-focus-mode-0.4.1.tgz
+```
 
 可以通过以下命令检查 bundle 是否被识别：
 
@@ -30,7 +36,13 @@ dsh --profile web --dump-config
 
 ### 更新
 
-在 [Releases](https://github.com/Stautaffly/dsh-focus-mode/releases) 中选择兼容版本，把安装命令中的下载地址换成对应版本的 `.tgz` 地址，再执行 `dsh plugin --profile ... add <安装包地址>`，随后重启应用。上面的示例固定安装 `0.2.0`，重复执行只会重新安装该版本，不会自动选择未来版本。
+用新的版本号执行同一条安装命令即可覆盖升级：
+
+```sh
+dsh plugin --profile web add dsh-focus-mode@0.4.1
+```
+
+不带版本号时 CLI 会解析最新发布版本。升级前请查看 [Releases](https://github.com/Stautaffly/dsh-focus-mode/releases) 的变更与兼容说明，升级后重启应用。
 
 ### 卸载
 

@@ -8,17 +8,23 @@ Compatibility: dsh `>=0.2.1-rc.3`, validated against upstream commit `22ddee3792
 
 ## Installation, updates, and removal
 
-### Install a prebuilt package
+### Install from npm
 
-Downloadable packages are published on [GitHub Releases](https://github.com/Stautaffly/dsh-focus-mode/releases). Use the official dsh CLI to install the archive directly; users do not need to clone the repository, prepare a host checkout, or install TypeScript. This plugin has not been published to npm.
-
-Use the CLI belonging to your target DSH application and an initialized Web profile. For a profile named `web`:
+The plugin is published as [`dsh-focus-mode`](https://www.npmjs.com/package/dsh-focus-mode). Use the dsh CLI of the target application with an initialized Web profile; users do not need to clone the repository, prepare a host checkout, or install TypeScript. For a profile named `web`:
 
 ```sh
-dsh plugin --profile web add https://github.com/Stautaffly/dsh-focus-mode/releases/download/v0.2.0/dsh-focus-mode-0.2.0.tgz
+dsh plugin --profile web add dsh-focus-mode
 ```
 
-Replace `web` with your actual profile name, such as `web-vanilla`; this command changes only the selected profile. Restart that DSH application after installation, refresh the browser, and choose **Focus mode** in a new session. Installation adds a preset without changing your current default.
+Pin the version (`dsh-focus-mode@0.4.1`) when an installation must be reproducible. Replace `web` with your actual profile name, such as `web-vanilla`; the command changes only the selected profile. Restart that dsh application after installation, refresh the browser, and choose **Focus mode** in a new session. Installation adds a preset without changing your current default.
+
+### Install from a release archive
+
+Offline installations can use the archive attached to [GitHub Releases](https://github.com/Stautaffly/dsh-focus-mode/releases). Both routes install the same files.
+
+```sh
+dsh plugin --profile web add https://github.com/Stautaffly/dsh-focus-mode/releases/download/v0.4.1/dsh-focus-mode-0.4.1.tgz
+```
 
 To check that the bundle was discovered, run:
 
@@ -30,7 +36,13 @@ The output should contain `external-preset-focus-mode`. The compatibility requir
 
 ### Update
 
-Choose a compatible version from [Releases](https://github.com/Stautaffly/dsh-focus-mode/releases), then run the same `dsh plugin --profile ... add <release-archive-url>` command with that version's download URL and restart the application. The example above pins `0.1.2`; repeating it reinstalls that version rather than selecting a future release automatically.
+Run the same install command with a newer version to replace the current one:
+
+```sh
+dsh plugin --profile web add dsh-focus-mode@0.4.1
+```
+
+Without a version the CLI resolves the newest published release. Check the [Releases](https://github.com/Stautaffly/dsh-focus-mode/releases) page for changes and compatibility notes before upgrading, then restart the application.
 
 ### Remove
 
