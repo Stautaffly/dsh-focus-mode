@@ -4,7 +4,7 @@ English | [简体中文](README.zh.md)
 
 An external [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) preset with persistent shell sessions, direct tool calls, and TypeScript program execution. No dsh source or frontend patches are required.
 
-Compatibility: dsh `0.2.1-rc.3`, validated against upstream commit `22ddee3792402c3e70ec5f86a63c3e3e895a2f60`. Node.js `>=24.9` is required. This repository extracts the 0.1.2 plugin implementation; its runtime sources and bundle declaration match that implementation.
+Compatibility: dsh `>=0.2.1-rc.3`, validated against upstream commit `22ddee3792402c3e70ec5f86a63c3e3e895a2f60`. Node.js `>=24.9` is required. This repository extracts the 0.1.2 plugin implementation; its runtime sources and bundle declaration match that implementation.
 
 ## Installation, updates, and removal
 
