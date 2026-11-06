@@ -41,3 +41,16 @@ export function response(header: string, body: string, limit: number): string {
   retainer.push(body)
   return `${header}\n${notice}${retainer.finish().text}`
 }
+
+/**
+ * Bound one observed output body to the complete-result byte budget.
+ * @param body - Observed terminal output.
+ * @param limit - Byte cap for the body.
+ * @returns The possibly shortened tail and whether bytes were dropped.
+ */
+export function clipTail(body: string, limit: number): { text: string; incomplete: boolean } {
+  if (Buffer.byteLength(body) <= limit) return { text: body, incomplete: false }
+  const retainer = new TextRetainer({ kind: 'tail', maxBytes: limit })
+  retainer.push(body)
+  return { text: retainer.finish().text, incomplete: true }
+}

@@ -4,6 +4,7 @@
     "cordis_inspect_query",
     "create_worktree",
     "exec_command",
+    "focus_sessions",
     "interrupt_agent",
     "job_kill",
     "job_list",

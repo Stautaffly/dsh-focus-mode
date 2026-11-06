@@ -15,7 +15,7 @@
 请使用目标 DSH 应用对应的 CLI，并先初始化目标 Web profile。以名为 `web` 的 profile 为例：
 
 ```sh
-dsh plugin --profile web add https://github.com/Stautaffly/dsh-focus-mode/releases/download/v0.1.2/dsh-focus-mode-0.1.2.tgz
+dsh plugin --profile web add https://github.com/Stautaffly/dsh-focus-mode/releases/download/v0.2.0/dsh-focus-mode-0.2.0.tgz
 ```
 
 把 `web` 换成实际使用的 profile 名称，例如 `web-vanilla`；命令只修改指定的 profile。安装完成后，重启对应的 DSH 应用、刷新浏览器，并在新会话中选择 **Focus mode**。安装只增加预设，不会更改现有的默认选择。
@@ -30,7 +30,7 @@ dsh --profile web --dump-config
 
 ### 更新
 
-在 [Releases](https://github.com/Stautaffly/dsh-focus-mode/releases) 中选择兼容版本，把安装命令中的下载地址换成对应版本的 `.tgz` 地址，再执行 `dsh plugin --profile ... add <安装包地址>`，随后重启应用。上面的示例固定安装 `0.1.2`，重复执行只会重新安装该版本，不会自动选择未来版本。
+在 [Releases](https://github.com/Stautaffly/dsh-focus-mode/releases) 中选择兼容版本，把安装命令中的下载地址换成对应版本的 `.tgz` 地址，再执行 `dsh plugin --profile ... add <安装包地址>`，随后重启应用。上面的示例固定安装 `0.2.0`，重复执行只会重新安装该版本，不会自动选择未来版本。
 
 ### 卸载
 
@@ -46,8 +46,10 @@ dsh plugin --profile web remove dsh-focus-mode
 
 ## 功能与行为
 
-- `exec_command({cmd, session_id?, cwd?, run_in_background?})` 新建或复用 Agent 独有的持久 shell。工作目录、环境变量可跨调用保留；`cwd` 只适用于新会话。
+- `exec_command({cmd, session_id?, cwd?, run_in_background?, new_session?})` 在 Agent 独有的持久 shell 中执行命令。工作目录、环境变量可跨调用保留：省略 `session_id` 即复用该 Agent 最近使用的存活 shell，调用方不必自己保存 id。传 `new_session:true` 新建另一条 shell；传 `cwd` 会为该目录新建一条，且只在创建时生效。不带 `session_id` 的后台命令会新建自己的 shell，因为后台 job 独占整条 shell。
 - `write_stdin({session_id, chars?, run_in_background?, close?})` 读取新增输出或发送输入。换行提交输入，单独发送 Ctrl-C 中断；`close:true` 关闭 shell 并释放配额。
+- `focus_sessions({})` 列出该 Agent 拥有的 shell：`session_id`、运行或已退出状态、是否正被某次调用或后台 job 占用，以及省略 `session_id` 时会复用哪一条。
+- 每次调用都返回结构化结果：`session_id`、`status`、`created`、`send`、`wait`、`text`、`incomplete`，适用时还有 `exit_code`、`signal` 或 `job_id`。直接调用渲染出的文本仍保留原来的 `[session …]` 头部；`run_code` 程序直接读取字段，不必解析该头部。`created` 区分新建与复用，未知 `session_id` 会列出现存活 shell。
 - `run_code` 使用上游 PTC 执行器。插件注册的可见工具会通过宿主注册表自动进入直接调用 schema 与程序 SDK，执行器不维护工具名称白名单。作用域、当前步骤准入、限制、审批、guard、取消和日志仍由宿主管理。
 - 后台 job 监视整条 shell，直到它退出或关闭；`job_kill` 会关闭该 shell。每条 shell 最多有一个后台监视器。**shell 仍在运行或一次 send 已结算，都不能证明某条命令已经完成。**
 
@@ -55,7 +57,7 @@ dsh plugin --profile web remove dsh-focus-mode
 
 ## 配置
 
-插件默认允许每个 Agent 保有四条持久 shell，可配置为 1–64 条。上游 jobs 注册表另有并发 job 配额。[16 条 session / 16 个 job 的示例](examples/limits-16.patch.yml) 同时覆盖两项：
+插件默认允许每个 Agent 保有四条持久 shell，可配置为 1–64 条。`reuseMostRecentSession` 让省略 `session_id` 的调用保持在同一条 shell 上；关闭后每次调用都必须显式给出 `session_id` 或 `new_session`。上游 jobs 注册表另有并发 job 配额。[16 条 session / 16 个 job 的示例](examples/limits-16.patch.yml) 同时覆盖两项：
 
 ```sh
 dsh --profile focus-sandbox --patch ./examples/limits-16.patch.yml --dump-config
@@ -70,6 +72,7 @@ dsh --profile focus-sandbox --patch ./examples/limits-16.patch.yml
 | --- | --- | --- |
 | `backendType` | `shell` | 已注册的终端后端 |
 | `maxSessionsPerAgent` | 4 | 1–64 |
+| `reuseMostRecentSession` | `true` | 布尔值 |
 | `maxResultBytes` | 262144 | 256–16777216 字节 |
 | `yieldMs` | 1000 | 0–60000 毫秒 |
 | `pollMs` | 50 | 1–10000 毫秒 |

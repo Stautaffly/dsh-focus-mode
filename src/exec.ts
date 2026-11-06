@@ -10,7 +10,7 @@ import type { ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-jobs'
 import type {} from '@deepseek-ai/dsh-working-directory'
 import z from '@deepseek-ai/schemastery'
-import { delta, response } from './output.js'
+import { clipTail, delta, response } from './output.js'
 
 declare module '@deepseek-ai/dsh-jobs' {
   interface JobKindMap { 'focus-session': 'focus-session' }
@@ -24,13 +24,15 @@ export const inject = ['tools', 'systemPrompt', 'terminals', 'workingDirectory',
 export const Config = z.object({
   backendType: z.string().default('shell'),
   maxSessionsPerAgent: z.number().step(1).min(1).max(64).default(4),
+  reuseMostRecentSession: z.boolean().default(true),
   maxResultBytes: z.number().step(1).min(256).max(16 * 1024 * 1024).default(262144),
   yieldMs: z.number().step(1).min(0).max(60000).default(1000),
   pollMs: z.number().step(1).min(1).max(10000).default(50),
   readLines: z.number().step(1).min(1).max(100000).default(10000),
 })
 type Settings = ReturnType<typeof Config>
-interface Args { session_id: string; chars?: string; run_in_background?: boolean; close?: boolean }
+interface ExecArgs { cmd: string; session_id?: string; cwd?: string; run_in_background?: boolean; new_session?: boolean }
+interface WriteArgs { session_id: string; chars?: string; run_in_background?: boolean; close?: boolean }
 interface RecordState {
   owner: Agent
   id: ReturnType<typeof TerminalSessionId>
@@ -41,9 +43,75 @@ interface RecordState {
   busy: boolean
   monitor?: AbortController
   closing?: Promise<void>
+  used: number
 }
+type ShellStatus = 'running' | 'exited' | 'closed'
+type SendState = 'settled' | 'pending' | 'none'
 
-/** Bind two command tools, with plugin-owned cursors and bounded session counts.
+/** One command-tool result: shell identity, readiness, and the observed output window. */
+interface CommandOutput {
+  session_id: string
+  status: ShellStatus
+  created: boolean
+  closed: boolean
+  send: SendState
+  wait: string
+  text: string
+  incomplete: boolean
+  exit_code?: number
+  signal?: string
+  job_id?: string
+}
+/** One owned shell as reported by the listing tool. */
+interface SessionView {
+  session_id: string
+  status: ShellStatus
+  busy: boolean
+  background: boolean
+  most_recent: boolean
+}
+interface SessionListOutput { sessions: SessionView[] }
+
+const COMMAND_OUTPUT_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    session_id: { type: 'string', required: true },
+    status: { type: 'string', required: true, enum: ['running', 'exited', 'closed'] },
+    created: { type: 'boolean', required: true },
+    closed: { type: 'boolean', required: true },
+    send: { type: 'string', required: true, enum: ['settled', 'pending', 'none'] },
+    wait: { type: 'string', required: true },
+    text: { type: 'string', required: true },
+    incomplete: { type: 'boolean', required: true },
+    exit_code: { type: 'number' },
+    signal: { type: 'string' },
+    job_id: { type: 'string' },
+  },
+} as const
+const SESSION_LIST_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    sessions: {
+      type: 'array',
+      required: true,
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          session_id: { type: 'string', required: true },
+          status: { type: 'string', required: true, enum: ['running', 'exited', 'closed'] },
+          busy: { type: 'boolean', required: true },
+          background: { type: 'boolean', required: true },
+          most_recent: { type: 'boolean', required: true },
+        },
+      },
+    },
+  },
+} as const
+
+/** Bind command tools, sticky shells, plugin-owned cursors, and bounded session counts.
  * @param ctx Preset-private terminal context.
  * @param input Deployment configuration.
  */
@@ -51,6 +119,7 @@ export function apply(ctx: Context, input: Partial<Settings> = {}): void {
   const config = Config(input)
   const owners = new Map<Agent, Map<string, RecordState>>()
   const reservations = new Map<Agent, number>()
+  let usage = 0
 
   const page = (state: RecordState) => {
     const current = ctx.terminals.read(state.owner, state.id, { offset: 0, count: config.readLines })
@@ -62,18 +131,52 @@ export function apply(ctx: Context, input: Partial<Settings> = {}): void {
     if (value === undefined) throw new TerminalError(`unknown focus session ${state.id}`, 'NO_SESSION')
     return value
   }
-  const read = (state: RecordState): string => {
+  /** Registry status that does not fail for a shell the backend already released. */
+  const statusOf = (state: RecordState): ShellStatus => {
+    try { return snapshot(state).status.kind === 'exited' ? 'exited' : 'running' }
+    catch { return 'closed' }
+  }
+  const liveIds = (owner: Agent): string[] => [...owners.get(owner)?.values() ?? []]
+    .filter(state => statusOf(state) === 'running')
+    .map(state => String(state.id))
+  const notOpen = (owner: Agent, id: string): string => {
+    const live = liveIds(owner)
+    return live.length === 0
+      ? `session ${id} is not open and this agent has no live shell; run exec_command to start one`
+      : `session ${id} is not open; live shells: ${live.join(', ')}`
+  }
+  const header = (value: CommandOutput): string => {
+    if (value.closed) return `[session ${value.session_id} | closed]`
+    if (value.job_id !== undefined) return `[session ${value.session_id} | background job ${value.job_id}]`
+    if (value.status === 'exited') return `[session ${value.session_id} | shell exited: ${value.exit_code ?? value.signal ?? 'unknown'}]`
+    return `[session ${value.session_id} | shell running; send ${value.send}; wait ${value.wait}]`
+  }
+  const read = (state: RecordState, created: boolean): CommandOutput => {
     const current = page(state)
     const fresh = delta(state.cursor, current.text)
-    const incomplete = fresh.gap || (current.truncated && current.text !== state.cursor)
-    state.cursor = current.text
+    const clipped = clipTail(fresh.text, config.maxResultBytes)
     const status = snapshot(state).status
-    const detail = status.kind === 'exited'
-      ? `shell exited: ${status.exitCode ?? status.signal}`
-      : `shell running; send ${state.operation === undefined ? 'settled' : 'pending'}; wait ${state.wait}`
-    const header = `[session ${state.id} | ${detail}]`
-    return response(header, `${incomplete ? '[retained output may be incomplete]\n' : ''}${fresh.text}`, config.maxResultBytes)
+    // Cursor must advance after the gap test: the retained window no longer
+    // matching the previous snapshot is itself evidence of missing output.
+    const incomplete = fresh.gap || clipped.incomplete || (current.truncated && current.text !== state.cursor)
+    state.cursor = current.text
+    return {
+      session_id: String(state.id),
+      status: status.kind === 'exited' ? 'exited' : 'running',
+      created,
+      closed: false,
+      send: state.operation === undefined ? 'settled' : 'pending',
+      wait: state.wait,
+      text: clipped.text,
+      incomplete,
+      ...status.kind === 'exited' && status.exitCode !== null ? { exit_code: status.exitCode } : {},
+      ...status.kind === 'exited' && status.exitCode === null && status.signal !== null ? { signal: String(status.signal) } : {},
+    }
   }
+  const closedOutput = (state: RecordState): CommandOutput => ({
+    session_id: String(state.id), status: 'closed', created: false, closed: true,
+    send: 'none', wait: 'closed', text: '', incomplete: false,
+  })
   const close = (state: RecordState): Promise<void> => {
     if (state.closing !== undefined) return state.closing
     state.closing = Promise.resolve().then(async () => {
@@ -92,10 +195,24 @@ export function apply(ctx: Context, input: Partial<Settings> = {}): void {
 
   const find = (owner: Agent, id: string) => {
     // Registry performs the authoritative cross-agent ownership check first.
-    ctx.terminals.read(owner, TerminalSessionId(id), { count: 1 })
+    try { ctx.terminals.read(owner, TerminalSessionId(id), { count: 1 }) }
+    catch (error) {
+      if (error instanceof TerminalError && error.code === 'NO_SESSION') throw new TerminalError(notOpen(owner, id), 'NO_SESSION')
+      throw error
+    }
     const state = owners.get(owner)?.get(id)
-    if (state === undefined) throw new TerminalError(`session ${id} was not opened by focus-mode`, 'NO_SESSION')
+    if (state === undefined) throw new TerminalError(notOpen(owner, id), 'NO_SESSION')
     return state
+  }
+  /** The agent's most recently used shell that can accept a foreground command now. */
+  const sticky = (owner: Agent): RecordState | undefined => {
+    const records = owners.get(owner)
+    if (records === undefined) return undefined
+    const candidates = [...records.values()].filter(state =>
+      state.busy !== true && state.operation === undefined && state.monitor === undefined && statusOf(state) === 'running')
+    if (candidates.length === 0) return undefined
+    candidates.sort((left, right) => right.used - left.used)
+    return candidates[0]
   }
   const create = async (owner: Agent, cwd: string | undefined, signal: AbortSignal) => {
     let records = owners.get(owner)
@@ -110,7 +227,7 @@ export function apply(ctx: Context, input: Partial<Settings> = {}): void {
     try {
       const base = await ctx.workingDirectory.ensure(owner, signal)
       const value = await ctx.terminals.spawn(owner, { type: config.backendType, ...cwd === undefined ? {} : { cwd: resolve(base, cwd) } }, signal)
-      const state: RecordState = { owner, id: TerminalSessionId(value.sessionId), cursor: '', wait: 'inferred_idle', busy: false }
+      const state: RecordState = { owner, id: TerminalSessionId(value.sessionId), cursor: '', wait: 'inferred_idle', busy: false, used: 0 }
       records.set(state.id, state)
       return state
     } finally {
@@ -131,7 +248,7 @@ export function apply(ctx: Context, input: Partial<Settings> = {}): void {
       if (state.operation === operation) delete state.operation
     })
   }
-  const poll = async (state: RecordState, signal: AbortSignal, waitForSend: boolean, preserveSession = true) => {
+  const poll = async (state: RecordState, signal: AbortSignal, waitForSend: boolean, preserveSession = true, created = false): Promise<CommandOutput> => {
     const abort = () => state.operation?.cancel()
     signal.addEventListener('abort', abort, { once: true })
     if (signal.aborted) abort()
@@ -143,7 +260,7 @@ export function apply(ctx: Context, input: Partial<Settings> = {}): void {
         const current = page(state)
         const hasOutput = current.text !== state.cursor
         if ((waitForSend ? state.operation === undefined : hasOutput)
-          || snapshot(state).status.kind === 'exited' || Date.now() >= deadline) return read(state)
+          || snapshot(state).status.kind === 'exited' || Date.now() >= deadline) return read(state, created)
         await delay(Math.min(config.pollMs, Math.max(1, deadline - Date.now())), undefined, { signal })
       }
     } catch (error) {
@@ -166,61 +283,81 @@ export function apply(ctx: Context, input: Partial<Settings> = {}): void {
       throw error
     } finally { signal.removeEventListener('abort', abort) }
   }
-  const background = (state: RecordState, exec: ToolRunContext, send?: { text: string; submit: boolean }): string => {
+  const background = (state: RecordState, exec: ToolRunContext, created: boolean, send?: { text: string; submit: boolean }): CommandOutput => {
     if (state.monitor !== undefined) throw new Error(`session ${state.id} already has a background monitor; use job_output or write_stdin`)
     const controller = new AbortController()
     state.monitor = controller
     let cursor = state.cursor
     let killing = false
     let jobId
-    try { jobId = ctx.jobs.start({
-      kind: 'focus-session', label: `persistent session ${state.id}`, owner: state.owner.id,
-      toolCall: { callId: exec.callId, rootCallId: exec.rootCallId }, outputLimitBytes: config.maxResultBytes,
-      run(job) {
-        if (send !== undefined) start(state, send.text, send.submit)
-        const pump = async () => {
-          try {
-            while (true) {
-              const current = page(state)
-              const fresh = delta(cursor, current.text)
-              const incomplete = fresh.gap || (current.truncated && current.text !== cursor)
-              cursor = current.text
-              if (incomplete) job.append('[retained output may be incomplete]\n')
-              job.append(fresh.text)
-              if (state.failure !== undefined) throw state.failure
-              if (snapshot(state).status.kind === 'exited') return { status: 'completed' as const }
-              await delay(config.pollMs, undefined, { signal: controller.signal })
-            }
-          } catch (error) {
-            if (controller.signal.aborted) {
-              if (killing) await close(state)
-              else await state.closing
-              return { status: 'killed' as const }
-            }
-            return { status: 'failed' as const, detail: String(error) }
-          } finally { if (state.monitor === controller) delete state.monitor }
-        }
-        return { cancel: () => { killing = true; controller.abort() }, done: pump() }
-      },
-    }) } catch (error) {
+    try {
+      jobId = ctx.jobs.start({
+        kind: 'focus-session', label: `persistent session ${state.id}`, owner: state.owner.id,
+        toolCall: { callId: exec.callId, rootCallId: exec.rootCallId }, outputLimitBytes: config.maxResultBytes,
+        run(job) {
+          if (send !== undefined) start(state, send.text, send.submit)
+          const pump = async () => {
+            try {
+              while (true) {
+                const current = page(state)
+                const fresh = delta(cursor, current.text)
+                const clipped = clipTail(fresh.text, config.maxResultBytes)
+                cursor = current.text
+                if (fresh.gap || clipped.incomplete) job.append('[retained output may be incomplete]\n')
+                job.append(clipped.text)
+                if (state.failure !== undefined) throw state.failure
+                if (snapshot(state).status.kind === 'exited') return { status: 'completed' as const }
+                await delay(config.pollMs, undefined, { signal: controller.signal })
+              }
+            } catch (error) {
+              if (controller.signal.aborted) {
+                if (killing) await close(state)
+                else await state.closing
+                return { status: 'killed' as const }
+              }
+              return { status: 'failed' as const, detail: String(error) }
+            } finally { if (state.monitor === controller) delete state.monitor }
+          }
+          return { cancel: () => { killing = true; controller.abort() }, done: pump() }
+        },
+      })
+    } catch (error) {
       controller.abort()
       delete state.monitor
       throw error
     }
-    return response(`[session ${state.id} | background job ${jobId}]`, 'Use job_output to collect output. job_kill closes this entire shell. The job monitors the persistent session until it exits or is closed; it does not certify individual command completion.', config.maxResultBytes)
+    return {
+      session_id: String(state.id), status: statusOf(state), created, closed: false,
+      send: state.operation === undefined ? 'settled' : 'pending', wait: state.wait, incomplete: false, job_id: String(jobId),
+      text: 'Use job_output to collect output. job_kill closes this entire shell. The job monitors the persistent session until it exits or is closed; it does not certify individual command completion.',
+    }
   }
   const ownerOf = (exec: ToolRunContext) => {
     if (exec.agent === undefined) throw new Error('focus command tools require an initiating Agent')
     return exec.agent
   }
-  const withState = async (state: RecordState, run: () => Promise<string>) => {
+  const withState = async (state: RecordState, run: () => Promise<CommandOutput>) => {
     if (state.busy) throw new TerminalError(`session ${state.id} already has a command-tool call in progress`, 'SEND_ACTIVE')
     state.busy = true
+    state.used = ++usage
     try { return await run() } finally { state.busy = false }
   }
-  const output = {
-    schema: { type: 'string' as const },
-    render: (_args: unknown, text: string) => [{ type: 'text' as const, text }],
+  const renderCommand = (_args: unknown, value: CommandOutput) => [
+    {
+      type: 'text' as const,
+      text: response(header(value), (value.incomplete ? '[retained output may be incomplete]\n' : '') + value.text, config.maxResultBytes),
+    },
+  ]
+  const renderSessions = (_args: unknown, value: SessionListOutput) => {
+    if (value.sessions.length === 0) return [{ type: 'text' as const, text: '[focus shells: none]\nNo persistent shell is open; exec_command starts one.' }]
+    const lines = value.sessions.map(session => [
+      session.session_id,
+      session.status,
+      ...session.most_recent ? ['default'] : [],
+      ...session.busy ? ['busy'] : [],
+      ...session.background ? ['monitored'] : [],
+    ].join(' '))
+    return [{ type: 'text' as const, text: `[focus shells: ${value.sessions.length}]\n${lines.join('\n')}` }]
   }
   const finalizeContent: NonNullable<ToolDefinition['finalizeContent']> = (_exec, result) => {
     const text = result.content.filter(block => block.type === 'text').map(block => block.text).join('\n')
@@ -229,26 +366,39 @@ export function apply(ctx: Context, input: Partial<Settings> = {}): void {
   }
   ctx.tools.register(defineTool({
     name: 'exec_command',
-    description: 'Run a command in an Agent-owned persistent shell. Reuse session_id to keep cwd and environment. Returns after a bounded wait; a running shell or settled send does not prove the command completed. run_in_background returns a job monitoring this session; job_kill closes the shell.',
+    description: 'Run a command in an Agent-owned persistent shell. Without session_id it reuses this agent\'s most recently used live shell; pass new_session:true (or cwd) to start another shell. Reuse session_id to target a specific shell. Returns after a bounded wait; a running shell or settled send does not prove the command completed. run_in_background without session_id starts its own shell and returns a job monitoring it; job_kill closes that shell.',
     parameters: {
       cmd: { type: 'string', required: true }, session_id: { type: 'string' }, cwd: { type: 'string' },
-      run_in_background: { type: 'boolean' },
+      run_in_background: { type: 'boolean' }, new_session: { type: 'boolean' },
     },
-    output, finalizeContent,
-    async execute(args: { cmd: string; session_id?: string; cwd?: string; run_in_background?: boolean }, exec) {
+    output: { schema: COMMAND_OUTPUT_SCHEMA, render: renderCommand },
+    finalizeContent,
+    async execute(args: ExecArgs, exec) {
       if (args.cmd.trim().length === 0) throw new Error('cmd must not be empty')
       if (args.session_id !== undefined && args.cwd !== undefined) throw new Error('cwd applies only to a new session; use cd to change an existing shell')
+      if (args.session_id !== undefined && args.new_session === true) throw new Error('new_session applies only without session_id; omit session_id to reuse the default shell')
       const owner = ownerOf(exec)
-      const fresh = args.session_id === undefined
-      const state = fresh ? await create(owner, args.cwd, exec.signal) : find(owner, args.session_id!)
+      const backgroundCall = args.run_in_background === true
+      let state: RecordState
+      let created = false
+      if (args.session_id !== undefined) state = find(owner, args.session_id)
+      else {
+        const reusable = !backgroundCall && args.cwd === undefined && args.new_session !== true && config.reuseMostRecentSession
+        const reused = reusable ? sticky(owner) : undefined
+        if (reused !== undefined) state = reused
+        else {
+          state = await create(owner, args.cwd, exec.signal)
+          created = true
+        }
+      }
       return withState(state, async () => {
         try {
           exec.signal.throwIfAborted()
-          if (args.run_in_background === true) return background(state, exec, { text: args.cmd, submit: true })
+          if (args.run_in_background === true) return background(state, exec, created, { text: args.cmd, submit: true })
           start(state, args.cmd, true)
-          return await poll(state, exec.signal, true, !fresh)
+          return await poll(state, exec.signal, true, !created, created)
         } catch (error) {
-          if (fresh) {
+          if (created) {
             try { await close(state) }
             catch (cleanupError) {
               throw new AggregateError([error, cleanupError], response(
@@ -271,30 +421,54 @@ export function apply(ctx: Context, input: Partial<Settings> = {}): void {
       session_id: { type: 'string', required: true }, chars: { type: 'string' },
       run_in_background: { type: 'boolean' }, close: { type: 'boolean' },
     },
-    output, finalizeContent,
-    async execute(args: Args, exec) {
+    output: { schema: COMMAND_OUTPUT_SCHEMA, render: renderCommand },
+    finalizeContent,
+    async execute(args: WriteArgs, exec) {
       const state = find(ownerOf(exec), args.session_id)
       return withState(state, async () => {
         if (args.close === true) {
           if (args.chars !== undefined || args.run_in_background === true) throw new Error('close cannot be combined with chars or run_in_background')
+          const value = closedOutput(state)
           await close(state)
-          return `[session ${state.id} | closed]`
+          return value
         }
         if (args.run_in_background === true && state.monitor !== undefined) throw new Error(`session ${state.id} already has a background monitor`)
         if (args.run_in_background === true && args.chars !== '\u0003') {
-          return background(state, exec, args.chars === undefined || args.chars.length === 0 ? undefined : { text: args.chars, submit: false })
+          return background(state, exec, false, args.chars === undefined || args.chars.length === 0 ? undefined : { text: args.chars, submit: false })
         }
         if (args.chars !== undefined && args.chars.length > 0) {
           if (args.chars === '\u0003') await ctx.terminals.signal(state.owner, state.id, 'SIGINT')
           else start(state, args.chars, false)
         }
-        return args.run_in_background === true ? background(state, exec) : poll(state, exec.signal, args.chars !== undefined)
+        return args.run_in_background === true ? background(state, exec, false) : poll(state, exec.signal, args.chars !== undefined)
       })
     },
     presentCall: args => ({ card: 'terminal', title: args.close ? '(close)' : args.chars ?? '(read)', description: args.session_id }),
   }))
+  ctx.tools.register(defineTool({
+    name: 'focus_sessions',
+    description: 'List the persistent shells this agent owns for exec_command and write_stdin: session_id, whether each shell is running, busy with a call or monitored by a background job, and which shell exec_command reuses by default.',
+    parameters: {},
+    output: { schema: SESSION_LIST_SCHEMA, render: renderSessions },
+    finalizeContent,
+    async execute(_args: object, exec) {
+      const owner = ownerOf(exec)
+      const recent = sticky(owner)
+      const sessions = [...owners.get(owner)?.values() ?? []]
+        .map(state => ({
+          session_id: String(state.id),
+          status: statusOf(state),
+          busy: state.busy === true || state.operation !== undefined,
+          background: state.monitor !== undefined,
+          most_recent: recent !== undefined && recent.id === state.id,
+        }))
+        .sort((left, right) => left.session_id.localeCompare(right.session_id))
+      return { sessions }
+    },
+    presentCall: () => ({ card: 'generic', title: 'focus_sessions' }),
+  }))
   ctx.systemPrompt.section({
     name: 'tool:focus-commands', order: ctx.systemPrompt.getSectionOrder('TOOL_PTY'),
-    text: 'exec_command starts a persistent shell. Keep its session_id for write_stdin or later commands. Poll to read output produced between calls. A shell running, a timeout, or a settled send is not proof the command finished. Background jobs monitor entire sessions; job_kill closes that shell. Use write_stdin with close:true when a session is no longer needed.',
+    text: 'exec_command starts or reuses a persistent shell. Omitting session_id reuses this agent\'s most recently used live shell; pass new_session:true or cwd to start another. Keep the returned session_id for write_stdin or later commands; focus_sessions lists the shells this agent owns. Poll to read output produced between calls. A shell running, a timeout, or a settled send is not proof the command finished. Background jobs monitor entire sessions; job_kill closes that shell. Use write_stdin with close:true when a session is no longer needed.',
   })
 }
