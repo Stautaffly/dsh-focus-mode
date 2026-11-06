@@ -53,6 +53,7 @@ For local builds and installation from a directory or archive, see [development]
 - `run_code` uses the upstream PTC executor. Available plugin tools enter both direct schemas and the program SDK through the host registry; the executor has no tool-name allowlist. Host scope, step admission, restrictions, approvals, guards, cancellation, and logging remain authoritative.
 - Background jobs monitor a whole shell until it exits or closes. `job_kill` closes that shell, and a shell has at most one monitor. `maxBackgroundJobsPerAgent` (default 2) bounds how many jobs one Agent runs at a time, so background work cannot consume every shell. A job completes when the shell exits or is closed, not when an individual command finishes: shell liveness or a settled send does **not** establish that a command finished.
 - A shell the backend reports as exited releases its slot immediately: it stops counting toward `maxSessionsPerAgent` and disappears from `focus_sessions`, so finishing a shell can never strand the quota.
+- When the host provides the change-request service (`forgeSession`), a command that runs `gh pr create`, names a change request with `gh pr view|edit|checkout`, or pushes a branch with `git push` binds those change requests to the Session, so the change-request panel lists them. A command that merely prints a URL binds nothing, and `bindChangeRequests: false` turns this off.
 
 The preset retains agent instructions, time context, compaction, skills, web tools, deliverables, plugin inspection/management, and workflows. Additional visible tools from Agent Teams, session search, worktrees, or terminal plugins are inherited automatically. Direct schemas plus the program SDK increase prompt size; PTC can keep intermediate results out of the conversation history.
 
@@ -75,6 +76,7 @@ In this dsh version, a profile patch replaces a matched row's **whole config**. 
 | `maxSessionsPerAgent` | 4 | 1–64 |
 | `maxBackgroundJobsPerAgent` | 2 | 1–64 |
 | `reuseMostRecentSession` | `true` | boolean |
+| `bindChangeRequests` | `true` | boolean |
 | `maxResultBytes` | 262144 | 256–16777216 bytes |
 | `yieldMs` | 1000 | 0–60000 ms |
 | `pollMs` | 50 | 1–10000 ms |
