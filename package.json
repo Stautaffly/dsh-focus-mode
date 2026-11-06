@@ -1,6 +1,6 @@
 {
   "name": "dsh-focus-mode",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "An external focus-mode preset with persistent command tools and hybrid execution.",
   "type": "module",
   "main": "./lib/index.js",
