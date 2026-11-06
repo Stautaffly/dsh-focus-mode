@@ -4,7 +4,7 @@
 
 面向 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 的外置预设插件，提供持久 shell、直接工具调用和 TypeScript 程序执行，无需修改 dsh 源码或前端。
 
-兼容版本：dsh `0.2.1-rc.3`，已在上游提交 `22ddee3792402c3e70ec5f86a63c3e3e895a2f60` 上验证。要求 Node.js `>=24.9`。本仓库从已验收的 0.1.2 实现中抽出，运行时源码与 bundle 声明保持一致。
+兼容版本：dsh `>=0.2.1-rc.3`，已在上游提交 `22ddee3792402c3e70ec5f86a63c3e3e895a2f60` 上验证。要求 Node.js `>=24.9`。本仓库从已验收的 0.1.2 实现中抽出，运行时源码与 bundle 声明保持一致。
 
 ## 安装、更新与卸载
 
