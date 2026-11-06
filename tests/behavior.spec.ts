@@ -57,11 +57,12 @@ class BindingRuntime extends PtcRuntime {
 const cleanup: (() => Promise<unknown>)[] = []
 afterEach(async () => { for (const dispose of cleanup.splice(0).reverse()) await dispose() })
 
-async function boot(options: Record<string, unknown> = {}) {
+async function boot(options: Record<string, unknown> = {}, fixtures: { forge?: Record<string, unknown> } = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'focus-codex-'))
   cleanup.push(() => rm(directory, { force: true, recursive: true }))
   const ctx = new Context()
   cleanup.push(() => ctx.fiber.dispose())
+  if (fixtures.forge !== undefined) ctx.provide('forgeSession', fixtures.forge as never)
   provideWorkingDirectoryFixture(ctx, directory)
   ctx.baseUrl = pathToFileURL(directory).href + '/'
   await ctx.plugin(Loader)
@@ -539,5 +540,39 @@ describe('sticky shells, discovery, and structured results', () => {
     expect((await call('focus_sessions', {})).text).toContain('[focus shells: none]')
     const replacement = valueOf((await call('exec_command', { cmd: 'echo FRESH' })).result)
     expect(replacement.created).toBe(true)
+  })
+  it('binds change requests a command created when the forge service is available', async () => {
+    const tracked: string[] = []
+    const { call } = await boot({}, { forge: { track: (_session: unknown, url: string) => { tracked.push(url) } } })
+    const value = await call('exec_command', { cmd: "echo 'gh pr create https://github.com/owner/repo/pull/7'" })
+    expect(value.result.isError, value.text).not.toBe(true)
+    expect(tracked).toEqual(['https://github.com/owner/repo/pull/7'])
+  })
+  it('reports a pushed branch to the forge service', async () => {
+    const pushes: { remote: string; branch: string }[] = []
+    const { call } = await boot({}, {
+      forge: {
+        track: () => {},
+        discoverBranch: async (_session: unknown, remote: string, branch: string) => { pushes.push({ remote, branch }) },
+      },
+    })
+    const value = await call('exec_command', {
+      cmd: "printf 'git push\nTo github.com:owner/repo.git\n   abc1234..def5678  focus-retry -> focus-retry\n'",
+    })
+    expect(value.result.isError, value.text).not.toBe(true)
+    await until(() => pushes.length === 1)
+    expect(pushes).toEqual([{ remote: 'github.com:owner/repo.git', branch: 'focus-retry' }])
+  })
+  it('keeps working when no forge service exists', async () => {
+    const { call } = await boot()
+    const value = await call('exec_command', { cmd: "echo 'gh pr create https://github.com/owner/repo/pull/8'" })
+    expect(value.result.isError, value.text).not.toBe(true)
+  })
+  it('skips change-request binding when the configuration disables it', async () => {
+    const tracked: string[] = []
+    const { call } = await boot({ bindChangeRequests: false }, { forge: { track: (_session: unknown, url: string) => { tracked.push(url) } } })
+    const value = await call('exec_command', { cmd: "echo 'gh pr create https://github.com/owner/repo/pull/9'" })
+    expect(value.result.isError, value.text).not.toBe(true)
+    expect(tracked).toEqual([])
   })
 })

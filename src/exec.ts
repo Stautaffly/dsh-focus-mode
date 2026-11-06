@@ -10,6 +10,7 @@ import type { ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-jobs'
 import type {} from '@deepseek-ai/dsh-working-directory'
 import z from '@deepseek-ai/schemastery'
+import { changeRequestEvidence } from './forge.js'
 import { clipTail, delta, response } from './output.js'
 
 declare module '@deepseek-ai/dsh-jobs' {
@@ -26,6 +27,7 @@ export const Config = z.object({
   maxSessionsPerAgent: z.number().step(1).min(1).max(64).default(4),
   maxBackgroundJobsPerAgent: z.number().step(1).min(1).max(64).default(2),
   reuseMostRecentSession: z.boolean().default(true),
+  bindChangeRequests: z.boolean().default(true),
   maxResultBytes: z.number().step(1).min(256).max(16 * 1024 * 1024).default(262144),
   yieldMs: z.number().step(1).min(0).max(60000).default(1000),
   pollMs: z.number().step(1).min(1).max(10000).default(50),
@@ -354,6 +356,31 @@ export function apply(ctx: Context, input: Partial<Settings> = {}): void {
     if (exec.agent === undefined) throw new Error('focus command tools require an initiating Agent')
     return exec.agent
   }
+  /** The host's change-request binding service, when the deployment provides it. */
+  interface ForgeSessionLike {
+    track(session: unknown, url: string): void
+    discoverBranch?(session: unknown, remote: string, branch: string): Promise<void>
+  }
+  /**
+   * Bind the change requests a command created, named, or pushed to its Session
+   * so the change-request panel lists them. Best effort: a deployment without
+   * the service, or a provider that rejects a URL, never fails the command.
+   */
+  const bindChangeRequests = (exec: ToolRunContext, command: string, output: string): void => {
+    if (!config.bindChangeRequests) return
+    const sink = (ctx as unknown as { get(name: string): unknown }).get('forgeSession') as ForgeSessionLike | undefined
+    if (sink === undefined || sink === null) return
+    const evidence = changeRequestEvidence(command, output)
+    if (evidence === undefined) return
+    const session = ownerOf(exec).session
+    try {
+      for (const url of evidence.urls) sink.track(session, url)
+      const pushed = evidence.push
+      if (pushed !== undefined && sink.discoverBranch !== undefined) {
+        void Promise.resolve(sink.discoverBranch(session, pushed.remote, pushed.branch)).catch(() => undefined)
+      }
+    } catch { /* binding is advisory */ }
+  }
   const withState = async (state: RecordState, run: () => Promise<CommandOutput>) => {
     if (state.busy) throw new TerminalError(`session ${state.id} already has a command-tool call in progress`, 'SEND_ACTIVE')
     state.busy = true
@@ -418,7 +445,9 @@ export function apply(ctx: Context, input: Partial<Settings> = {}): void {
           exec.signal.throwIfAborted()
           if (args.run_in_background === true) return background(state, exec, created, { text: args.cmd, submit: true })
           start(state, args.cmd, true)
-          return await poll(state, exec.signal, true, !created, created)
+          const value = await poll(state, exec.signal, true, !created, created)
+          bindChangeRequests(exec, args.cmd, value.text)
+          return value
         } catch (error) {
           if (created) {
             try { await close(state) }
@@ -462,7 +491,10 @@ export function apply(ctx: Context, input: Partial<Settings> = {}): void {
           if (args.chars === '\u0003') await ctx.terminals.signal(state.owner, state.id, 'SIGINT')
           else start(state, args.chars, false)
         }
-        return args.run_in_background === true ? background(state, exec, false) : poll(state, exec.signal, args.chars !== undefined)
+        if (args.run_in_background === true) return background(state, exec, false)
+        const value = await poll(state, exec.signal, args.chars !== undefined)
+        if (args.chars !== undefined) bindChangeRequests(exec, args.chars, value.text)
+        return value
       })
     },
     presentCall: args => ({ card: 'terminal', title: args.close ? '(close)' : args.chars ?? '(read)', description: args.session_id }),
