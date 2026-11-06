@@ -51,13 +51,14 @@ For local builds and installation from a directory or archive, see [development]
 - `focus_sessions({})` lists the shells this Agent owns with their `session_id`, running or exited state, whether a call or background job is using each one, and which shell an omitted `session_id` reuses.
 - Every result is a structured value: `session_id`, `status`, `created`, `send`, `wait`, `text`, and `incomplete`, plus `exit_code`, `signal`, or `job_id` when they apply. Direct calls render the same `[session …]` header as before; `run_code` programs read the fields instead of parsing that header. `created` tells a new shell apart from a reused one, and an unknown `session_id` names the live shells.
 - `run_code` uses the upstream PTC executor. Available plugin tools enter both direct schemas and the program SDK through the host registry; the executor has no tool-name allowlist. Host scope, step admission, restrictions, approvals, guards, cancellation, and logging remain authoritative.
-- Background jobs monitor a whole shell until it exits or closes. `job_kill` closes that shell. Each shell has at most one background monitor. Shell liveness or a settled send does **not** establish that an individual command finished.
+- Background jobs monitor a whole shell until it exits or closes. `job_kill` closes that shell, and a shell has at most one monitor. `maxBackgroundJobsPerAgent` (default 2) bounds how many jobs one Agent runs at a time, so background work cannot consume every shell. A job completes when the shell exits or is closed, not when an individual command finishes: shell liveness or a settled send does **not** establish that a command finished.
+- A shell the backend reports as exited releases its slot immediately: it stops counting toward `maxSessionsPerAgent` and disappears from `focus_sessions`, so finishing a shell can never strand the quota.
 
 The preset retains agent instructions, time context, compaction, skills, web tools, deliverables, plugin inspection/management, and workflows. Additional visible tools from Agent Teams, session search, worktrees, or terminal plugins are inherited automatically. Direct schemas plus the program SDK increase prompt size; PTC can keep intermediate results out of the conversation history.
 
 ## Configuration
 
-The plugin defaults to four persistent shell sessions per Agent. Session count is configurable from 1 to 64. `reuseMostRecentSession` keeps calls that omit `session_id` on one shell; turn it off to require an explicit `session_id` or `new_session` on every call. The upstream jobs registry has a separate concurrent-job limit. The [16-session/16-job example](examples/limits-16.patch.yml) overrides both:
+The plugin defaults to four persistent shell sessions per Agent and two background jobs per Agent. Session count is configurable from 1 to 64. `reuseMostRecentSession` keeps calls that omit `session_id` on one shell; turn it off to require an explicit `session_id` or `new_session` on every call. The upstream jobs registry has a separate concurrent-job limit. The [16-session/16-job example](examples/limits-16.patch.yml) overrides both:
 
 ```sh
 dsh --profile focus-sandbox --patch ./examples/limits-16.patch.yml --dump-config
@@ -72,6 +73,7 @@ In this dsh version, a profile patch replaces a matched row's **whole config**. 
 | --- | --- | --- |
 | `backendType` | `shell` | Registered terminal backend |
 | `maxSessionsPerAgent` | 4 | 1–64 |
+| `maxBackgroundJobsPerAgent` | 2 | 1–64 |
 | `reuseMostRecentSession` | `true` | boolean |
 | `maxResultBytes` | 262144 | 256–16777216 bytes |
 | `yieldMs` | 1000 | 0–60000 ms |

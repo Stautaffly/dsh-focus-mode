@@ -24,6 +24,7 @@ export const inject = ['tools', 'systemPrompt', 'terminals', 'workingDirectory',
 export const Config = z.object({
   backendType: z.string().default('shell'),
   maxSessionsPerAgent: z.number().step(1).min(1).max(64).default(4),
+  maxBackgroundJobsPerAgent: z.number().step(1).min(1).max(64).default(2),
   reuseMostRecentSession: z.boolean().default(true),
   maxResultBytes: z.number().step(1).min(256).max(16 * 1024 * 1024).default(262144),
   yieldMs: z.number().step(1).min(0).max(60000).default(1000),
@@ -136,6 +137,9 @@ export function apply(ctx: Context, input: Partial<Settings> = {}): void {
     try { return snapshot(state).status.kind === 'exited' ? 'exited' : 'running' }
     catch { return 'closed' }
   }
+  /** Background jobs currently monitoring one of this agent's shells. */
+  const monitored = (owner: Agent): number => [...owners.get(owner)?.values() ?? []]
+    .filter(state => state.monitor !== undefined).length
   const liveIds = (owner: Agent): string[] => [...owners.get(owner)?.values() ?? []]
     .filter(state => statusOf(state) === 'running')
     .map(state => String(state.id))
@@ -160,7 +164,7 @@ export function apply(ctx: Context, input: Partial<Settings> = {}): void {
     // matching the previous snapshot is itself evidence of missing output.
     const incomplete = fresh.gap || clipped.incomplete || (current.truncated && current.text !== state.cursor)
     state.cursor = current.text
-    return {
+    const value: CommandOutput = {
       session_id: String(state.id),
       status: status.kind === 'exited' ? 'exited' : 'running',
       created,
@@ -172,6 +176,10 @@ export function apply(ctx: Context, input: Partial<Settings> = {}): void {
       ...status.kind === 'exited' && status.exitCode !== null ? { exit_code: status.exitCode } : {},
       ...status.kind === 'exited' && status.exitCode === null && status.signal !== null ? { signal: String(status.signal) } : {},
     }
+    // An exited shell can never accept another command, so stop counting it
+    // toward maxSessionsPerAgent the moment the backend reports the exit.
+    if (status.kind === 'exited') owners.get(state.owner)?.delete(state.id)
+    return value
   }
   const closedOutput = (state: RecordState): CommandOutput => ({
     session_id: String(state.id), status: 'closed', created: false, closed: true,
@@ -285,6 +293,7 @@ export function apply(ctx: Context, input: Partial<Settings> = {}): void {
   }
   const background = (state: RecordState, exec: ToolRunContext, created: boolean, send?: { text: string; submit: boolean }): CommandOutput => {
     if (state.monitor !== undefined) throw new Error(`session ${state.id} already has a background monitor; use job_output or write_stdin`)
+    if (monitored(state.owner) >= config.maxBackgroundJobsPerAgent) throw new Error(`background job limit ${config.maxBackgroundJobsPerAgent} for this agent; collect or kill a running job first, or raise focus-commands config.maxBackgroundJobsPerAgent`)
     const controller = new AbortController()
     state.monitor = controller
     let cursor = state.cursor
@@ -299,6 +308,12 @@ export function apply(ctx: Context, input: Partial<Settings> = {}): void {
           const pump = async () => {
             try {
               while (true) {
+                // Check the shell first: a backend that already finished it can
+                // reject reads, and that is a completed job, not a failed one.
+                if (statusOf(state) !== 'running') {
+                  owners.get(state.owner)?.delete(state.id)
+                  return { status: 'completed' as const }
+                }
                 const current = page(state)
                 const fresh = delta(cursor, current.text)
                 const clipped = clipTail(fresh.text, config.maxResultBytes)
@@ -306,10 +321,13 @@ export function apply(ctx: Context, input: Partial<Settings> = {}): void {
                 if (fresh.gap || clipped.incomplete) job.append('[retained output may be incomplete]\n')
                 job.append(clipped.text)
                 if (state.failure !== undefined) throw state.failure
-                if (snapshot(state).status.kind === 'exited') return { status: 'completed' as const }
                 await delay(config.pollMs, undefined, { signal: controller.signal })
               }
             } catch (error) {
+              if (error instanceof TerminalError && error.code === 'NO_SESSION') {
+                owners.get(state.owner)?.delete(state.id)
+                return { status: 'completed' as const }
+              }
               if (controller.signal.aborted) {
                 if (killing) await close(state)
                 else await state.closing
@@ -366,7 +384,7 @@ export function apply(ctx: Context, input: Partial<Settings> = {}): void {
   }
   ctx.tools.register(defineTool({
     name: 'exec_command',
-    description: 'Run a command in an Agent-owned persistent shell. Without session_id it reuses this agent\'s most recently used live shell; pass new_session:true (or cwd) to start another shell. Reuse session_id to target a specific shell. Returns after a bounded wait; a running shell or settled send does not prove the command completed. run_in_background without session_id starts its own shell and returns a job monitoring it; job_kill closes that shell.',
+    description: 'Run a command in an Agent-owned persistent shell. Without session_id it reuses this agent\'s most recently used live shell; pass new_session:true (or cwd) to start another shell. Reuse session_id to target a specific shell. Returns after a bounded wait; a running shell or settled send does not prove the command completed. run_in_background without session_id starts its own shell and returns a job monitoring it; job_kill closes that shell. At most ${config.maxBackgroundJobsPerAgent} background jobs run per agent.',
     parameters: {
       cmd: { type: 'string', required: true }, session_id: { type: 'string' }, cwd: { type: 'string' },
       run_in_background: { type: 'boolean' }, new_session: { type: 'boolean' },
@@ -387,6 +405,10 @@ export function apply(ctx: Context, input: Partial<Settings> = {}): void {
         const reused = reusable ? sticky(owner) : undefined
         if (reused !== undefined) state = reused
         else {
+          // Reject before spending a shell slot on a job the limit cannot accept.
+          if (backgroundCall && monitored(owner) >= config.maxBackgroundJobsPerAgent) {
+            throw new Error(`background job limit ${config.maxBackgroundJobsPerAgent} for this agent; collect or kill a running job first, or raise focus-commands config.maxBackgroundJobsPerAgent`)
+          }
           state = await create(owner, args.cwd, exec.signal)
           created = true
         }
@@ -454,21 +476,28 @@ export function apply(ctx: Context, input: Partial<Settings> = {}): void {
     async execute(_args: object, exec) {
       const owner = ownerOf(exec)
       const recent = sticky(owner)
-      const sessions = [...owners.get(owner)?.values() ?? []]
-        .map(state => ({
+      const records = owners.get(owner)
+      const sessions: SessionView[] = []
+      for (const state of [...records?.values() ?? []]) {
+        const status = statusOf(state)
+        // A shell the backend already finished counting cannot be reused or closed,
+        // so listing it would only invite another failed call.
+        if (status !== 'running') { records?.delete(state.id); continue }
+        sessions.push({
           session_id: String(state.id),
-          status: statusOf(state),
+          status,
           busy: state.busy === true || state.operation !== undefined,
           background: state.monitor !== undefined,
           most_recent: recent !== undefined && recent.id === state.id,
-        }))
-        .sort((left, right) => left.session_id.localeCompare(right.session_id))
+        })
+      }
+      sessions.sort((left, right) => left.session_id.localeCompare(right.session_id))
       return { sessions }
     },
     presentCall: () => ({ card: 'generic', title: 'focus_sessions' }),
   }))
   ctx.systemPrompt.section({
     name: 'tool:focus-commands', order: ctx.systemPrompt.getSectionOrder('TOOL_PTY'),
-    text: 'exec_command starts or reuses a persistent shell. Omitting session_id reuses this agent\'s most recently used live shell; pass new_session:true or cwd to start another. Keep the returned session_id for write_stdin or later commands; focus_sessions lists the shells this agent owns. Poll to read output produced between calls. A shell running, a timeout, or a settled send is not proof the command finished. Background jobs monitor entire sessions; job_kill closes that shell. Use write_stdin with close:true when a session is no longer needed.',
+    text: 'exec_command starts or reuses a persistent shell. Omitting session_id reuses this agent\'s most recently used live shell; pass new_session:true or cwd to start another. Keep the returned session_id for write_stdin or later commands; focus_sessions lists the shells this agent owns. Poll to read output produced between calls. A shell running, a timeout, or a settled send is not proof the command finished. Background jobs monitor entire sessions, at most ${config.maxBackgroundJobsPerAgent} run at once, and job_kill closes that shell. A shell that exits releases its slot automatically; use write_stdin with close:true when a live shell is no longer needed.',
   })
 }
